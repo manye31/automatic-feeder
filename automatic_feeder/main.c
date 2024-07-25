@@ -18,10 +18,15 @@ enum AugerMode {
     JIGGLE
 };
 
+void readFoodLevels(void);
 void fillFoodBowls(void);
 void fillWaterBowl(void);
 void augerCommand(enum AugerMode mode);
-void readFoodLevels(void);
+
+void step_cw(void);
+void step_ccw(void);
+void rotate(int deg, char dir, float stride, float rot_t);
+
 void wait(volatile int msec);
 
 char food_bowl_level = 0; // food bowl level (TEMP from potentiometer)
@@ -44,23 +49,23 @@ enum AugerMode AUGER_MODE;
 int main(void)
 {
     // Registers
-    DDRC = 0b0000011;  // PC0 - LED1 (red)
-                       // PC1 - LED2 (green)
-                       // PC5 - Analog output simulation
 
-    DDRD = 0b01000011; // PD0 - motor dir output
-                       // PD1 - motor dir output
+    DDRD = 0b11000010; // PD1 - motor dir output M1
                        // PD2 - Manual mode INT input, also food stuck
                        // PD4 - Cat/dog toggle simulator input
+                       // PD5 - Animal toggle (WIP)
                        // PD6 - PWM output
+                       // PD7 - motor dir output M2
 
-    PORTC = 0b0000011; // Default LEDs to OFF
+    DDRB = 0b00110000; // PB4-5 LED1/2 (R/G)
+
+    PORTB = 0b00110000; // Default LEDs to OFF
 
     /* ADC Setup */
     // ADC Multiplexer
-    ADMUX = 0b00100101;  // (6-7) REF set to 00 (AREF)
+    ADMUX = 0b00100000;  // (6-7) REF set to 00 (AREF)
                          // (5) ADLAR to 1 (Left-just)
-                         // (3-0) MUX to 0101 (PC5)
+                         // (3-0) MUX to 0000 (PC0)
     
     // Power reduction register
     PRR = 0x00;          // Power ADC on
@@ -103,11 +108,11 @@ int main(void)
 
         // Check underweight status of food bowl
         if (food_supply_level < food_supply_thresh) {
-            PORTC &= 0b1111110; // Turn LED1 (red) ON
-            PORTC |= 0b0000010; // Turn LED2 (green) OFF
+            PORTB &= 0b11101111; // Turn LED1 (red) ON
+            PORTB |= 0b00100000; // Turn LED2 (green) OFF
         } else {
-            PORTC &= 0b1111101; // Turn LED2 (green) ON
-            PORTC |= 0b0000001; // Turn LED1 (red) OFF
+            PORTB &= 0b11011111; // Turn LED2 (green) ON
+            PORTB |= 0b00010000; // Turn LED1 (red) OFF 
         }
 
         // Read food size mode input
@@ -163,13 +168,13 @@ void fillFoodBowls(void) {
         }
         augerCommand(OFF);
         // OFF Signal
-        PORTC &= 0b1111110; // Turn LED1 (red) ON
+        PORTB &= 0b11101111; // Turn LED1 (red) ON
         wait(200);
-        PORTC |= 0b0000001; // Turn LED1 (red) OFF
+        PORTB |= 0b00010000; // Turn LED1 (red) OFF
         wait(200);
-        PORTC &= 0b1111110; // Turn LED1 (red) ON
+        PORTB &= 0b11101111; // Turn LED1 (red) ON
         wait(200);
-        PORTC |= 0b0000001; // Turn LED1 (red) OFF
+        PORTB |= 0b00010000; // Turn LED1 (red) OFF
 
         // First pet feed, load in next, if applicable
         pet_num--;
@@ -189,31 +194,31 @@ void augerCommand(enum AugerMode mode) {
     switch (mode) {
         case OFF:
         OCR0A = 0x00; // Stop motor
-        PORTD &= 0b11111100; // Clear M1 and M2 in H-bridge
+        PORTD &= 0b01111101; // Clear M1 and M2 in H-bridge
 		break;
         case SLOW:
         OCR0A = 175; // Rotate motor slowly
-        PORTD &= 0b11111110; // Clear M1
-        PORTD |= 0b00000010; // Set M2
+        PORTD &= 0b11111101; // Clear M1
+        PORTD |= 0b10000000; // Set M2
         break;
         case FAST:
         OCR0A = 255; // Rotate motor quickly
-        PORTD &= 0b11111110; // Clear M1
-        PORTD |= 0b00000010; // Set M2
+        PORTD &= 0b11111101; // Clear M1
+        PORTD |= 0b10000000; // Set M2
         break;
         case JIGGLE:
         OCR0A = 200;
-        PORTD &= 0b11111110; // Clear M1
-        PORTD |= 0b00000010; // Set M2
+        PORTD &= 0b11111101; // Clear M1
+        PORTD |= 0b10000000; // Set M2
         wait(300);
-        PORTD &= 0b11111101; // Clear M2
-        PORTD |= 0b00000001; // Set M1
+        PORTD &= 0b01111111; // Clear M1
+        PORTD |= 0b00000001; // Set M2
         wait(300);
-        PORTD &= 0b11111110; // Clear M1
-        PORTD |= 0b00000010; // Set M2
+        PORTD &= 0b11111101; // Clear M1
+        PORTD |= 0b10000000; // Set M2
         wait(300);
-        PORTD &= 0b11111101; // Clear M2
-        PORTD |= 0b00000001; // Set M1
+        PORTD &= 0b01111111; // Clear M1
+        PORTD |= 0b00000001; // Set M2
         wait(300);
         break;
     }
