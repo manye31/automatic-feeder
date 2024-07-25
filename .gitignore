@@ -1,0 +1,11 @@
+# Atmel Binaries
+Debug/
+Release/
+
+# User Specific Files
+.vs/
+*.atsuo
+*.componentinfo.xml
+
+# Irrelevant submission docs
+**/main.c.pdf
