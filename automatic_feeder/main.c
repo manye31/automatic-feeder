@@ -44,6 +44,9 @@ char food_size_mode = 0; // 0 - Cat food, 1 - dog food
 char begin_feed = 0; // feed flag
 char begin_water = 0; // water flag
 
+float STRIDE = 7.5; // [deg]; Motor model ST_PM35_15_11C stride
+char phase_step = 1; // current phase step for stepper
+
 enum AugerMode AUGER_MODE;
 
 int main(void)
@@ -57,6 +60,8 @@ int main(void)
                        // PD6 - PWM output
                        // PD7 - motor dir output M2
 
+    DDRC = 0b0111100; // (1a = C5) (1b = C4) (2a = C3) (2b = C2)
+    
     DDRB = 0b00110000; // PB4-5 LED1/2 (R/G)
 
     PORTB = 0b00110000; // Default LEDs to OFF
@@ -180,6 +185,15 @@ void fillFoodBowls(void) {
         pet_num--;
         food_stuck = 0;
 
+        // Rotate 270d CW in 2 second
+        rotate(270, 1, STRIDE, 2000);
+        wait(500);
+        // Rotate 90d CCW in 1 second
+        rotate(270, 0, STRIDE, 1000);
+        wait(500);
+
+        PORTC &= 0b1000011; // Turn stepper OFF
+
         if (pet_num > 0) {
             // flip chute gate
         } // else, exit while loop
@@ -262,5 +276,114 @@ void wait(volatile int msec) {
         // Stop TIMER1
         TCCR1B = 0x00;
         msec--;
+    }
+}
+
+void rotate(int deg, char dir, float stride, float rot_t) {
+    /**
+     * @brief rotate motor counter clockwise
+     * 
+     * @param deg [deg] total rotation angle
+     * @param dir [-] direction. 1 (CCW), 0 (CW)
+     * @param stride [deg] motor stride, in same units as deg
+     * @param rot_t [ms] time to complete rotation in
+     */
+    
+    int total_steps = deg/stride; // Undershoot if not perfect
+    int wait_t = rot_t/total_steps; // [ms] trim off microsecond decimal
+    
+    // Define step type
+    void (*step)(void);
+    if (dir == 1) {
+        // ccw
+        step = step_ccw;
+    } else {
+        // cw
+        step = step_cw;
+    }
+
+    for (int t = 0; t < total_steps; ++t) {
+        step();
+        wait(wait_t);
+    }
+}
+
+void step_ccw(void) {
+    /**
+     * @brief Step the motor phase counter-clockwise 1 step
+     * 
+     * @details Phases: (1a = D7) (1b = D6) (2a = D5) (2b = D4)  
+     * @details Phases: (1a = C5) (1b = C4) (2a = C3) (2b = C2)        
+     *  1,3,4,2
+     */
+    switch (phase_step) {
+        case 1:
+        // step to 2
+        PORTC &= 0b1000011;
+        PORTC |= 0b0000100;
+        // PORTD = 0b00010000;
+        phase_step = 2;
+        break;
+        case 2:
+        // step to 3
+        PORTC &= 0b1000011;
+        PORTC |= 0b0010000;
+        // PORTD = 0b01000000;
+        phase_step = 3;
+        break;
+        case 3:
+        // step to 4
+        PORTC &= 0b1000011;
+        PORTC |= 0b0001000;
+        // PORTD = 0b00100000;
+        phase_step = 4;
+        break;
+        case 4:
+        // step to 1
+        PORTC &= 0b1000011;
+        PORTC |= 0b0100000;
+        // PORTD = 0b10000000;
+        phase_step = 1;
+        break;
+    }
+}
+
+void step_cw(void) {
+    /**
+     * @brief Step the motor phase counter-clockwise 1 step
+     * 
+     * @details Phases: (1a = D7) (1b = D6) (2a = D5) (2b = D4)
+     * @details Phases: (1a = C5) (1b = C4) (2a = C3) (2b = C2)        
+     * 
+     */
+    switch (phase_step) {
+        case 1:
+        // step to 4
+        PORTC &= 0b1000011;
+        PORTC |= 0b0001000;
+        // PORTD = 0b00100000;
+        phase_step = 4;
+        break;
+        case 2:
+        // step to 1
+        PORTC &= 0b1000011;
+        PORTC |= 0b0100000;
+        // PORTD = 0b10000000;
+        phase_step = 1;
+        break;
+        case 3:
+        // step to 2
+        PORTC &= 0b1000011;
+        PORTC |= 0b0000100;
+        // PORTD = 0b00010000;
+        phase_step = 2;
+        break;
+        case 4:
+        // step to 3
+        PORTC &= 0b1000011;
+        PORTC |= 0b0010000;
+        // PORTD = 0b01000000;
+        phase_step = 3;
+        break;
     }
 }
