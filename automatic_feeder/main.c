@@ -40,6 +40,7 @@ char friction_offset = 2; // Experimental offset for motor, min required speed
                            // to overcome friction torque in the motor
 
 char food_size_mode = 0; // 0 - Cat food, 1 - dog food
+char pet_num = 1; // Pet number
 
 char begin_feed = 0; // feed flag
 char begin_water = 0; // water flag
@@ -126,6 +127,17 @@ int main(void)
             food_size_mode = !food_size_mode;
         }
 
+        // Read animal count mode input
+        if (PIND & 0b00100000) {
+            // Toggle animal count mode between 1 and 2
+            char temp = pet_num + 1;
+            if (temp > 2) {
+                pet_num = 1;
+            }  else {
+                pet_num += 1;
+            }
+        }
+
         // Set auger mode
         if (food_size_mode == CAT) {
             AUGER_MODE = SLOW;
@@ -156,10 +168,10 @@ ISR(INT0_vect) {
 }
 
 void fillFoodBowls(void) {
-    // Single animal logic, for now
-    int pet_num = 1;
+    char pet_num_counter = pet_num;
+    char chute_gate_switched = 0; // Default gate state to not switched
 
-    while (pet_num > 0) {
+    while (pet_num_counter > 0) {
         while (food_bowl_level < food_bowl_thresh) {
             // Read food level
             readFoodLevels();
@@ -182,20 +194,17 @@ void fillFoodBowls(void) {
         PORTB |= 0b00010000; // Turn LED1 (red) OFF
 
         // First pet feed, load in next, if applicable
-        pet_num--;
+        pet_num_counter--;
         food_stuck = 0;
 
-        // Rotate 270d CW in 2 second
-        rotate(270, 1, STRIDE, 2000);
-        wait(500);
-        // Rotate 90d CCW in 1 second
-        rotate(270, 0, STRIDE, 1000);
-        wait(500);
-
-        PORTC &= 0b1000011; // Turn stepper OFF
-
-        if (pet_num > 0) {
+        if (pet_num_counter == 1 || chute_gate_switched == 1) {
             // flip chute gate
+            // Rotate 90d CW/CCW in 2 second
+            rotate(90, !chute_gate_switched, STRIDE, 1000);
+            // State init 0: We rotate CCW, Set to 1, now we rotate CW
+            wait(500);
+            chute_gate_switched = 1; // Update state to reflect it being switched            
+            PORTC &= 0b1000011; // Turn stepper OFF
         } // else, exit while loop
     }
 }
