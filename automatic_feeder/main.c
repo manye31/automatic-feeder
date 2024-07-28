@@ -7,9 +7,17 @@
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include "hx711.h"	   // Include folder for amplifier
 
-#define CAT 0x00
-#define DOG 0x01
+// PORTB Pins
+#define RED_LED 0b00000010         // Red LED bit PC1
+// #define GREEN_LED 0b01000000       // Green LED bit
+#define DONE_FEEDING 0b00100000    // Done feeding bit
+#define START_MEASURING 0b00000001 // Start measuring bit PD0
+
+// Auger States
+#define CAT         0x00
+#define DOG         0x01
 
 enum AugerMode {
     OFF,
@@ -18,9 +26,18 @@ enum AugerMode {
     JIGGLE
 };
 
-void readFoodLevels(void);
+// Hx711 Setup 
+int8_t gain = HX711_GAINCHANNELA128;
+int32_t offset = 8487500;
+double calibrationweight = 82;
+int32_t calib_offset = 8503700;
+double scale = 402; //(calib_offset-offset)/calibrationweight;
+
+// Functions
+double readFoodLevels(char bowl );//= 0);
 void fillFoodBowls(void);
 void fillWaterBowl(void);
+void motorOffSequence(void);
 void augerCommand(enum AugerMode mode);
 
 void step_cw(void);
@@ -29,11 +46,13 @@ void rotate(int deg, char dir, float stride, float rot_t);
 
 void wait(volatile int msec);
 
-char food_bowl_level = 0; // food bowl level (TEMP from potentiometer)
-char food_bowl_thresh = 127; // threshold when to fill bowl again
+// Init global var
+char food_serving_size = 0; // food serving size
+double food_bowl_level = 0.0; // food bowl level (TEMP from potentiometer)
+double food_bowl_level_lc = 0.0;
+double abs_bowl_thresh = 127.0; // threshold when to fill bowl again
+double rel_bowl_thresh = 127.0;
 
-char food_supply_level = 255; // food supply level (TEMP manually set for demo)
-char food_supply_thresh = 25; // threshold when to signal low supply
 char food_stuck = 0; // Assume food is not stuck
 
 char friction_offset = 2; // Experimental offset for motor, min required speed
@@ -53,19 +72,22 @@ enum AugerMode AUGER_MODE;
 int main(void)
 {
     // Registers
-
-    DDRD = 0b11000010; // PD1 - motor dir output M1
-                       // PD2 - Manual mode INT input, also food stuck
+    DDRD = 0b11000011; // PD0 - uC1 start measuring [Out]
+                       // PD1 - motor dir output M1
+                       // PD2 - uC1 Manual mode INT input, also food stuck [IN]
+                       // PD3 - uC1 Turn motor OFF [IN]
                        // PD4 - Cat/dog toggle simulator input
                        // PD5 - Animal toggle (WIP)
                        // PD6 - PWM output
                        // PD7 - motor dir output M2
 
-    DDRC = 0b0111100; // (1a = C5) (1b = C4) (2a = C3) (2b = C2)
+    DDRC = 0b0111110; // (1a = C5) (1b = C4) (2a = C3) (2b = C2), C1 RED LED
     
-    DDRB = 0b00110000; // PB4-5 LED1/2 (R/G)
+    DDRB = DONE_FEEDING; // PB0-1 Bowl 1 Load cell amplifier
+                         // PB2-4 uC1 Food Qty Select [IN]
+                         // PB5 done feeding
 
-    PORTB = 0b00110000; // Default LEDs to OFF
+    PORTC = RED_LED; // Default LEDs to OFF
 
     /* ADC Setup */
     // ADC Multiplexer
@@ -101,25 +123,19 @@ int main(void)
 	OCR0A = 0x00;        // Preset duty cycle to 0
 
     // INTERRUPTS
-    EICRA = 0b00000010; // Falling edge for INT0. Switch configured
+    EICRA = 0b0000010; // Falling edge for INT0. Switch configured
                         // as active high, so falling edge is at press-in
+                        // Rising edge for INT1. uC1 Setting bit
 	EIMSK = 0b00000001; // Enable INT0
 	sei(); // Enable global interrupts
 
     while (1) 
     {
-        // Assuming "timer loop" already finished
 		// Read food sensors
-		readFoodLevels();
+		food_bowl_level = readFoodLevels(0);
 
-        // Check underweight status of food bowl
-        if (food_supply_level < food_supply_thresh) {
-            PORTB &= 0b11101111; // Turn LED1 (red) ON
-            PORTB |= 0b00100000; // Turn LED2 (green) OFF
-        } else {
-            PORTB &= 0b11011111; // Turn LED2 (green) ON
-            PORTB |= 0b00010000; // Turn LED1 (red) OFF 
-        }
+        // Read food serving size
+        food_serving_size = (PORTB & 0b00011100) >> 2; // TODO: Add scaling factor
 
         // Read food size mode input
         if (PIND & 0b00010000) {
@@ -168,49 +184,70 @@ ISR(INT0_vect) {
 }
 
 void fillFoodBowls(void) {
-    char pet_num_counter = pet_num;
+    char current_bowl = 0; // Init bowl we are feeding
     char chute_gate_switched = 0; // Default gate state to not switched
+    double og_food_level = readFoodLevels(current_bowl);
 
-    while (pet_num_counter > 0) {
-        while (food_bowl_level < food_bowl_thresh) {
-            // Read food level
-            readFoodLevels();
-			            
-            // If auger set to move and stuck, jiggle
-            if (AUGER_MODE > OFF && food_stuck) {
-                augerCommand(JIGGLE); // Will retain old auger mode
-            } else {
+    while (current_bowl < pet_num) {
+        if (current_bowl == 0) {
+            while (food_bowl_level < rel_bowl_thresh) {
+                // Read food level
+                food_bowl_level = readFoodLevels(current_bowl);
+                            
+                // If auger set to move and stuck, jiggle
+                if (AUGER_MODE > OFF && food_stuck) {
+                    augerCommand(JIGGLE); // Will retain old auger mode
+                } else {
+                    augerCommand(AUGER_MODE);
+                }
+            }
+        } else {
+            while (!(PIND & 0b00001000)) {
                 augerCommand(AUGER_MODE);
             }
         }
-        augerCommand(OFF);
-        // OFF Signal
-        PORTB &= 0b11101111; // Turn LED1 (red) ON
-        wait(200);
-        PORTB |= 0b00010000; // Turn LED1 (red) OFF
-        wait(200);
-        PORTB &= 0b11101111; // Turn LED1 (red) ON
-        wait(200);
-        PORTB |= 0b00010000; // Turn LED1 (red) OFF
+        motorOffSequence();
+
 
         // First pet feed, load in next, if applicable
-        pet_num_counter--;
+        current_bowl++;
         food_stuck = 0;
 
-        if (pet_num_counter == 1 || chute_gate_switched == 1) {
+        if ((current_bowl == 1 && pet_num == 2) || chute_gate_switched == 1) {
             // flip chute gate
             // Rotate 90d CW/CCW in 2 second
             rotate(90, !chute_gate_switched, STRIDE, 1000);
-            // State init 0: We rotate CCW, Set to 1, now we rotate CW
-            wait(500);
-            chute_gate_switched = 1; // Update state to reflect it being switched            
+            // State init 0: We rotate CCW, Set to 1, now we rotate CW      
             PORTC &= 0b1000011; // Turn stepper OFF
+            chute_gate_switched = !chute_gate_switched; // Update state to reflect it being switched  
+
+            // If on second bowl, send signal to uC1 to start measuring food
+            if (current_bowl == 1) {
+                PORTD |= START_MEASURING;
+            }
+
         } // else, exit while loop
     }
+
+    // Send done feeding signal to uC1
+    PORTB &= ~DONE_FEEDING;
+    PORTD &= ~START_MEASURING; // Start measuring OFF
 }
 
 void fillWaterBowl(void) {
     // do stuff
+}
+
+void motorOffSequence(void) {
+    augerCommand(OFF);
+    // OFF Signal
+    PORTC = ~RED_LED; // Turn LED1 (red) ON
+    wait(200);
+    PORTC |= RED_LED; // Turn LED1 (red) OFF
+    wait(200);
+    PORTC &= ~RED_LED; // Turn LED1 (red) ON
+    wait(200);
+    PORTC |= RED_LED; // Turn LED1 (red) OFF
 }
 
 void augerCommand(enum AugerMode mode) {
@@ -247,18 +284,36 @@ void augerCommand(enum AugerMode mode) {
     }
 }
 
-void readFoodLevels(void) {
-    // Read ADC
-    // Start ADC conversion
-    ADCSRA |= 0b01000000; // Set ADSC bit (start conversion)
+double readFoodLevels(char bowl) {
+    /**
+     * @brief Read in food levels
+     * 
+     * @details uC2 (this uC) will read the first bowl. uC1 reads the second
+     * bowl and sends high level commands to toggle the motor on/off when at
+     * right threshold
+     * 
+     */
 
-    // Wait for conversion to finish
-    // while (ADCSRA & (1 << ADSC)); // Polling ADSC until cleared (conversion finished)
-    //                               // Not using INT because INT1 needed for other functionality
-    while ((ADCSRA & 0b00010000) == 0) // While ADIF bit not set
-                                        // (INT flag when conversion complete)
-    food_bowl_level = ADCH; // Read in simulated "food level" from potentiometer
-    food_supply_level = food_supply_level; // placeholder for when reading in data via ADC
+    if (bowl == 0) {
+        // Read from load cell amplifier for weight, or simulated ADC input
+		food_bowl_level_lc = hx711_getweight();
+
+        // OR Read Simulated ADC
+        // Start ADC conversion
+        ADCSRA |= 0b01000000; // Set ADSC bit (start conversion)
+
+        // Wait for conversion to finish
+        // while (ADCSRA & (1 << ADSC)); // Polling ADSC until cleared (conversion finished)
+        //                               // Not using INT because INT1 needed for other functionality
+        while ((ADCSRA & 0b00010000) == 0) // While ADIF bit not set
+                                            // (INT flag when conversion complete)
+        food_bowl_level = ADCH; // Read in simulated "food level" from potentiometer
+    } else {
+		food_bowl_level = 0;
+	}
+    return food_bowl_level;
+
+    // If bowl 1+, no need to read. Wait for toggle OFF command from uC1
 }
 
 void wait(volatile int msec) {
