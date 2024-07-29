@@ -9,11 +9,21 @@
 #include <avr/interrupt.h>
 #include "hx711.h"	   // Include folder for amplifier
 
+// Debug variables
+char WEIGHT_SIM = 0;
+
 // PORTB Pins
 #define RED_LED 0b00000010         // Red LED bit PC1
-// #define GREEN_LED 0b01000000       // Green LED bit
-#define DONE_FEEDING 0b00100000    // Done feeding bit
+#define STARTED_FEEDING 0b00100000    // Done feeding bit
+#define YELLOW_LED 0b10000000
+#define BLUE_LED 0b01000000
+
+// PORTD Pins
 #define START_MEASURING 0b00000001 // Start measuring bit PD0
+
+// Food parameters
+#define FOOD_DENSITY 134 // [g/cup]
+#define MAX_FOOD_VOL 4 // [cup]
 
 // Auger States
 #define CAT         0x00
@@ -28,46 +38,51 @@ enum AugerMode {
 
 // Hx711 Setup 
 int8_t gain = HX711_GAINCHANNELA128;
-int32_t offset = 8487500;
-double calibrationweight = 82;
-int32_t calib_offset = 8503700;
-double scale = 402; //(calib_offset-offset)/calibrationweight;
+int32_t offset = 8433560;
+double calibrationweight = 82.0;
+int32_t calib_offset = 8440750;
+double scale = 25.0;
 
 // Functions
-double readFoodLevels(char bowl );//= 0);
+double readFoodLevels(void);
 void fillFoodBowls(void);
 void fillWaterBowl(void);
 void motorOffSequence(void);
 void augerCommand(enum AugerMode mode);
+double readServingSize(void);
 
 void step_cw(void);
 void step_ccw(void);
 void rotate(int deg, char dir, float stride, float rot_t);
 
 void wait(volatile int msec);
+void LED_TOGGLE(char on);
 
 // Init global var
-char food_serving_size = 0; // food serving size
-double food_bowl_level = 0.0; // food bowl level (TEMP from potentiometer)
-double food_bowl_level_lc = 0.0;
+// Food quantity tracking
+float food_serving_size = 0.0; // food serving size
+double food_weight = 0.0; // food bowl level (TEMP from potentiometer)
+double food_weight_lc = 0.0;
 double abs_bowl_thresh = 127.0; // threshold when to fill bowl again
 double rel_bowl_thresh = 127.0;
 
-char food_stuck = 0; // Assume food is not stuck
+double original_food_weight = 0;
+double target_food_weight = 0;
+double rel_food_weight = 0;
 
-char friction_offset = 2; // Experimental offset for motor, min required speed
-                           // to overcome friction torque in the motor
-
+// Motor control modes
 char food_size_mode = 0; // 0 - Cat food, 1 - dog food
 char pet_num = 1; // Pet number
+enum AugerMode AUGER_MODE;
 
+// Flags
 char begin_feed = 0; // feed flag
 char begin_water = 0; // water flag
+char food_stuck = 0; // Assume food is not stuck
 
+// Stepper motor
 float STRIDE = 7.5; // [deg]; Motor model ST_PM35_15_11C stride
 char phase_step = 1; // current phase step for stepper
-
-enum AugerMode AUGER_MODE;
 
 int main(void)
 {
@@ -83,12 +98,12 @@ int main(void)
 
     DDRC = 0b0111110; // (1a = C5) (1b = C4) (2a = C3) (2b = C2), C1 RED LED
     
-    DDRB = DONE_FEEDING; // PB0-1 Bowl 1 Load cell amplifier
+    DDRB = YELLOW_LED | BLUE_LED | STARTED_FEEDING; // PB0-1 Bowl 1 Load cell amplifier
                          // PB2-4 uC1 Food Qty Select [IN]
                          // PB5 done feeding
 
     PORTC = RED_LED; // Default LEDs to OFF
-
+	
     /* ADC Setup */
     // ADC Multiplexer
     ADMUX = 0b00100000;  // (6-7) REF set to 00 (AREF)
@@ -123,19 +138,19 @@ int main(void)
 	OCR0A = 0x00;        // Preset duty cycle to 0
 
     // INTERRUPTS
-    EICRA = 0b0000010; // Falling edge for INT0. Switch configured
-                        // as active high, so falling edge is at press-in
-                        // Rising edge for INT1. uC1 Setting bit
+    EICRA = 0b0000011; // Rising edge for INT0. Switch configured
+                        // as active high, so rising edge is at press-in
 	EIMSK = 0b00000001; // Enable INT0
 	sei(); // Enable global interrupts
-
+	hx711_init(gain, scale, offset);
+	
     while (1) 
     {
 		// Read food sensors
-		food_bowl_level = readFoodLevels(0);
+		food_weight = readFoodLevels();
 
         // Read food serving size
-        food_serving_size = (PORTB & 0b00011100) >> 2; // TODO: Add scaling factor
+        food_serving_size = readServingSize();
 
         // Read food size mode input
         if (PIND & 0b00010000) {
@@ -149,8 +164,10 @@ int main(void)
             char temp = pet_num + 1;
             if (temp > 2) {
                 pet_num = 1;
+                // LED_TOGGLE(0);
             }  else {
                 pet_num += 1;
+                // LED_TOGGLE(1);
             }
         }
 
@@ -186,17 +203,43 @@ ISR(INT0_vect) {
 void fillFoodBowls(void) {
     char current_bowl = 0; // Init bowl we are feeding
     char chute_gate_switched = 0; // Default gate state to not switched
-    double og_food_level = readFoodLevels(current_bowl);
+    original_food_weight = readFoodLevels();
 
+    if (!WEIGHT_SIM) {
+        target_food_weight = food_serving_size * FOOD_DENSITY;
+
+        // Truncate target
+        // if (target_food_weight + original_food_weight > (MAX_FOOD_VOL * FOOD_DENSITY)) {
+        //     target_food_weight = (MAX_FOOD_VOL -  food_serving_size) * FOOD_DENSITY;
+        // }
+    } else {
+        target_food_weight = 127;
+    }
+    
     while (current_bowl < pet_num) {
+        // Set STARTED_FEEDING bit high to alert uc1.
+        PORTB |= STARTED_FEEDING;
+
+        rel_food_weight = original_food_weight - readFoodLevels();
+        int stuck_t = 0; // Crude time tracking
+
         if (current_bowl == 0) {
-            while (food_bowl_level < rel_bowl_thresh) {
+            while (rel_food_weight < target_food_weight) {
+                // Wait 10s for until jiggle mode
+                wait(10);
+                stuck_t += 10;
+
                 // Read food level
-                food_bowl_level = readFoodLevels(current_bowl);
+                if (!WEIGHT_SIM) {
+                    rel_food_weight = readFoodLevels() - original_food_weight;
+                } else {
+                    rel_food_weight = readFoodLevels(); // Not actually relative weight
+                }
                             
                 // If auger set to move and stuck, jiggle
-                if (AUGER_MODE > OFF && food_stuck) {
+                if (AUGER_MODE > OFF && stuck_t > 500) {
                     augerCommand(JIGGLE); // Will retain old auger mode
+                    stuck_t = 0; // Reset stuck_time
                 } else {
                     augerCommand(AUGER_MODE);
                 }
@@ -207,7 +250,6 @@ void fillFoodBowls(void) {
             }
         }
         motorOffSequence();
-
 
         // First pet feed, load in next, if applicable
         current_bowl++;
@@ -230,7 +272,7 @@ void fillFoodBowls(void) {
     }
 
     // Send done feeding signal to uC1
-    PORTB &= ~DONE_FEEDING;
+    PORTB &= ~STARTED_FEEDING;
     PORTD &= ~START_MEASURING; // Start measuring OFF
 }
 
@@ -241,7 +283,7 @@ void fillWaterBowl(void) {
 void motorOffSequence(void) {
     augerCommand(OFF);
     // OFF Signal
-    PORTC = ~RED_LED; // Turn LED1 (red) ON
+    PORTC &= ~RED_LED; // Turn LED1 (red) ON
     wait(200);
     PORTC |= RED_LED; // Turn LED1 (red) OFF
     wait(200);
@@ -284,7 +326,7 @@ void augerCommand(enum AugerMode mode) {
     }
 }
 
-double readFoodLevels(char bowl) {
+double readFoodLevels(void) {
     /**
      * @brief Read in food levels
      * 
@@ -294,10 +336,9 @@ double readFoodLevels(char bowl) {
      * 
      */
 
-    if (bowl == 0) {
-        // Read from load cell amplifier for weight, or simulated ADC input
-		food_bowl_level_lc = hx711_getweight();
+    double level = 0;
 
+    if (WEIGHT_SIM) {
         // OR Read Simulated ADC
         // Start ADC conversion
         ADCSRA |= 0b01000000; // Set ADSC bit (start conversion)
@@ -307,13 +348,44 @@ double readFoodLevels(char bowl) {
         //                               // Not using INT because INT1 needed for other functionality
         while ((ADCSRA & 0b00010000) == 0) // While ADIF bit not set
                                             // (INT flag when conversion complete)
-        food_bowl_level = ADCH; // Read in simulated "food level" from potentiometer
+        level = ADCH; // Read in simulated "food level" from potentiometer
     } else {
-		food_bowl_level = 0;
-	}
-    return food_bowl_level;
+        // Read from load cell amplifier
+        level = hx711_getweight();
+    }
+
+    return level;
 
     // If bowl 1+, no need to read. Wait for toggle OFF command from uC1
+}
+
+double readServingSize(void) {
+    /**
+     * @brief Read serving size from binary input from uC1 and return
+     * respective serving size
+     * 
+     */
+    
+    char uc1_input = (PORTB & 0b00011100) >> 2;
+
+    if (uc1_input == 0) {
+        return 0.25;
+    } else if (uc1_input == 1) {
+        return 0.50;
+    } else if (uc1_input == 2) {
+        return 0.75;
+    } else if (uc1_input == 3) {
+        return 1.00;
+    } else if (uc1_input == 4) {
+        return 4.00;
+    } else if (uc1_input == 5) {
+        return 1.50;
+    } else if (uc1_input == 6) {
+        return 3.00;
+    } else if (uc1_input == 7) {
+        return 2.00;
+    }
+	return 0.0;
 }
 
 void wait(volatile int msec) {
