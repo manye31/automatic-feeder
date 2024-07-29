@@ -317,13 +317,13 @@ void augerCommand(enum AugerMode mode) {
         PORTD |= 0b10000000; // Set M2
         wait(300);
         PORTD &= 0b01111111; // Clear M1
-        PORTD |= 0b00000001; // Set M2
+        PORTD |= 0b00000010; // Set M2
         wait(300);
         PORTD &= 0b11111101; // Clear M1
         PORTD |= 0b10000000; // Set M2
         wait(300);
         PORTD &= 0b01111111; // Clear M1
-        PORTD |= 0b00000001; // Set M2
+        PORTD |= 0b00000010; // Set M2
         wait(300);
         break;
     }
