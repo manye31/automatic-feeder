@@ -15,8 +15,8 @@ char WEIGHT_SIM = 0;
 // PORTB Pins
 #define RED_LED 0b00000010         // Red LED bit PC1
 #define STARTED_FEEDING 0b00100000    // Done feeding bit
-#define YELLOW_LED 0b10000000
-#define BLUE_LED 0b01000000
+#define YELLOW_LED 0b01000000
+#define BLUE_LED 0b10000000
 
 // PORTD Pins
 #define START_MEASURING 0b00000001 // Start measuring bit PD0
@@ -56,7 +56,7 @@ void step_ccw(void);
 void rotate(int deg, char dir, float stride, float rot_t);
 
 void wait(volatile int msec);
-void LED_TOGGLE(char on);
+void LED_TOGGLE(char led, char port, char on);
 
 // Init global var
 // Food quantity tracking
@@ -101,6 +101,8 @@ int main(void)
     DDRB = YELLOW_LED | BLUE_LED | STARTED_FEEDING; // PB0-1 Bowl 1 Load cell amplifier
                          // PB2-4 uC1 Food Qty Select [IN]
                          // PB5 done feeding
+    
+    PORTB = YELLOW_LED | BLUE_LED; // Default LEDs to OFF
 
     PORTC = RED_LED; // Default LEDs to OFF
 	
@@ -156,6 +158,7 @@ int main(void)
         if (PIND & 0b00010000) {
             // Toggle food size mode
             food_size_mode = !food_size_mode;
+            LED_TOGGLE(BLUE_LED, 'B', food_size_mode);
         }
 
         // Read animal count mode input
@@ -164,10 +167,10 @@ int main(void)
             char temp = pet_num + 1;
             if (temp > 2) {
                 pet_num = 1;
-                // LED_TOGGLE(0);
+                LED_TOGGLE(YELLOW_LED, 'B', 0);
             }  else {
                 pet_num += 1;
-                // LED_TOGGLE(1);
+                LED_TOGGLE(YELLOW_LED, 'B', 1);
             }
         }
 
@@ -258,7 +261,7 @@ void fillFoodBowls(void) {
         if ((current_bowl == 1 && pet_num == 2) || chute_gate_switched == 1) {
             // flip chute gate
             // Rotate 90d CW/CCW in 2 second
-            rotate(90, !chute_gate_switched, STRIDE, 1000);
+            rotate(100, !chute_gate_switched, STRIDE, 1000);
             // State init 0: We rotate CCW, Set to 1, now we rotate CW      
             PORTC &= 0b1000011; // Turn stepper OFF
             chute_gate_switched = !chute_gate_switched; // Update state to reflect it being switched  
@@ -522,4 +525,37 @@ void step_cw(void) {
         phase_step = 3;
         break;
     }
+}
+
+void LED_TOGGLE(char led, char port, char on) {
+    if (on) {
+        switch (port) {
+            case 'B':
+                PORTB &= ~led;
+                break;
+            case 'C':
+                PORTC &= ~led;
+                break;
+            case 'D':
+                PORTD &= ~led;
+                break;
+            default:
+                break;
+        }
+    } else {
+        switch (port) {
+            case 'B':
+                PORTB |= led;
+                break;
+            case 'C':
+                PORTC |= led;
+                break;
+            case 'D':
+                PORTD |= led;
+                break;
+            default:
+                break;
+        }
+    }
+    wait(200);
 }
