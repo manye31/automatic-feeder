@@ -1,5 +1,5 @@
 /*
- * lab6_project.c
+ * main.c
  *
  * Created: 6/29/2024 1:55:43 PM
  * Author : Micah Nye
@@ -13,35 +13,21 @@
 char WEIGHT_SIM = 0;
 
 // PORTB Pins
-#define RED_LED 0b00000010         // Red LED bit PC1
-#define STARTED_FEEDING 0b00100000    // Done feeding bit
-#define YELLOW_LED 0b01000000
-#define BLUE_LED 0b10000000
+#define RED_LED 0x02            // Red LED bit PC1
+#define STARTED_FEEDING 0x20    // Done feeding PB5
+#define YELLOW_LED 0x40         // Yellow LED PB6
+#define BLUE_LED 0x80           // Blue LED PB7
 
 // PORTD Pins
 #define START_MEASURING 0b00000001 // Start measuring bit PD0
 
 // Food parameters
-#define FOOD_DENSITY 134 // [g/cup]
+#define FOOD_DENSITY 70 // [g/cup]
 #define MAX_FOOD_VOL 4 // [cup]
 
 // Auger States
 #define CAT         0x00
 #define DOG         0x01
-
-enum AugerMode {
-    OFF,
-    SLOW,
-    FAST,
-    JIGGLE
-};
-
-// Hx711 Setup 
-int8_t gain = HX711_GAINCHANNELA128;
-int32_t offset = 8433560;
-double calibrationweight = 82.0;
-int32_t calib_offset = 8440750;
-double scale = 25.0;
 
 // Functions
 double readFoodLevels(void);
@@ -58,13 +44,25 @@ void rotate(int deg, char dir, float stride, float rot_t);
 void wait(volatile int msec);
 void LED_TOGGLE(char led, char port, char on);
 
-// Init global var
+// Auger State
+enum AugerMode {
+    OFF,
+    SLOW,
+    FAST,
+    JIGGLE
+};
+
+// Hx711 Setup 
+int8_t gain = HX711_GAINCHANNELA128;
+int32_t offset = 8433560;
+double calibrationweight = 82.0;
+int32_t calib_offset = 8440750;
+double scale = 25;
+
+// Init global var (crude)
 // Food quantity tracking
 float food_serving_size = 0.0; // food serving size
-double food_weight = 0.0; // food bowl level (TEMP from potentiometer)
-double food_weight_lc = 0.0;
-double abs_bowl_thresh = 127.0; // threshold when to fill bowl again
-double rel_bowl_thresh = 127.0;
+double food_weight = 0.0; // food bowl level (from load cell or pot)
 
 double original_food_weight = 0;
 double target_food_weight = 0;
@@ -96,14 +94,19 @@ int main(void)
                        // PD6 - PWM output
                        // PD7 - motor dir output M2
 
-    DDRC = 0b0111110; // (1a = C5) (1b = C4) (2a = C3) (2b = C2), C1 RED LED
+    DDRC = 0b0111110; // PC1 - RED LED
+                      // PC2 - Stepper 2b
+                      // PC3 - Stepper 2a
+                      // PC4 - Stepper 1b
+                      // PC5 - Stepper 1a
     
     DDRB = YELLOW_LED | BLUE_LED | STARTED_FEEDING; // PB0-1 Bowl 1 Load cell amplifier
-                         // PB2-4 uC1 Food Qty Select [IN]
-                         // PB5 done feeding
+                                                    // PB2-4 uC1 Food Qty Select [IN]
+                                                    // PB5 Started feeding [OUT]
+                                                    // PB6 Blue LED
+                                                    // PB7 Yellow LED
     
     PORTB = YELLOW_LED | BLUE_LED; // Default LEDs to OFF
-
     PORTC = RED_LED; // Default LEDs to OFF
 	
     /* ADC Setup */
@@ -144,6 +147,8 @@ int main(void)
                         // as active high, so rising edge is at press-in
 	EIMSK = 0b00000001; // Enable INT0
 	sei(); // Enable global interrupts
+
+    // Init Amplifier
 	hx711_init(gain, scale, offset);
 	
     while (1) 
@@ -198,12 +203,30 @@ int main(void)
 
 /* Manual Override Button */
 ISR(INT0_vect) {
-    // Manual override button pressed
-    begin_feed = 1;
+    /**
+     * @brief Interrupt for manual feed override
+     * 
+     */
+
+    begin_feed = 1; // Manual override button pressed=
     EIFR = 0b00000001;
 }
 
 void fillFoodBowls(void) {
+    /**
+     * @brief Fill food bowls
+     * 
+     * @details There are 2 modes defined by WEIGHT_SIM variable. IF WEIGHT_SIM
+     * then we use the pot to sim weight. This will increment through the number
+     * of pets and feed them until the relative weight of the bowl exceeds the
+     * user-input serving size.
+     * 
+     * If in 2-pet mode, the stepper will switch and wait for a flag to be sent
+     * from uC1 to stop rotating. There was no space to read from another
+     * amplifier, so we use a crude wire communication between the uC's
+     * 
+     */
+
     char current_bowl = 0; // Init bowl we are feeding
     char chute_gate_switched = 0; // Default gate state to not switched
     original_food_weight = readFoodLevels();
@@ -212,9 +235,9 @@ void fillFoodBowls(void) {
         target_food_weight = food_serving_size * FOOD_DENSITY;
 
         // Truncate target
-        // if (target_food_weight + original_food_weight > (MAX_FOOD_VOL * FOOD_DENSITY)) {
-        //     target_food_weight = (MAX_FOOD_VOL -  food_serving_size) * FOOD_DENSITY;
-        // }
+        if (target_food_weight + original_food_weight > (MAX_FOOD_VOL * FOOD_DENSITY)) {
+            target_food_weight = (MAX_FOOD_VOL -  food_serving_size) * FOOD_DENSITY;
+        }
     } else {
         target_food_weight = 127;
     }
@@ -261,7 +284,7 @@ void fillFoodBowls(void) {
         if ((current_bowl == 1 && pet_num == 2) || chute_gate_switched == 1) {
             // flip chute gate
             // Rotate 90d CW/CCW in 2 second
-            rotate(100, !chute_gate_switched, STRIDE, 1000);
+            rotate(120, !chute_gate_switched, STRIDE, 1000);
             // State init 0: We rotate CCW, Set to 1, now we rotate CW      
             PORTC &= 0b1000011; // Turn stepper OFF
             chute_gate_switched = !chute_gate_switched; // Update state to reflect it being switched  
@@ -280,12 +303,20 @@ void fillFoodBowls(void) {
 }
 
 void fillWaterBowl(void) {
-    // do stuff
+    /**
+     * @brief Placeholder for filling water bowl
+     * 
+     */
 }
 
 void motorOffSequence(void) {
-    augerCommand(OFF);
-    // OFF Signal
+    /**
+     * @brief Helper function to turn motor off
+     * 
+     */
+
+    augerCommand(OFF); // OFF Signal
+    
     PORTC &= ~RED_LED; // Turn LED1 (red) ON
     wait(200);
     PORTC |= RED_LED; // Turn LED1 (red) OFF
@@ -296,13 +327,18 @@ void motorOffSequence(void) {
 }
 
 void augerCommand(enum AugerMode mode) {
+    /**
+     * @brief Command auger based on AugerMode state
+     * 
+     */
+
     switch (mode) {
         case OFF:
         OCR0A = 0x00; // Stop motor
         PORTD &= 0b01111101; // Clear M1 and M2 in H-bridge
 		break;
         case SLOW:
-        OCR0A = 175; // Rotate motor slowly
+        OCR0A = 225; // Rotate motor slowly
         PORTD &= 0b11111101; // Clear M1
         PORTD |= 0b10000000; // Set M2
         break;
@@ -312,7 +348,7 @@ void augerCommand(enum AugerMode mode) {
         PORTD |= 0b10000000; // Set M2
         break;
         case JIGGLE:
-        OCR0A = 200;
+        OCR0A = 255;
         PORTD &= 0b11111101; // Clear M1
         PORTD |= 0b10000000; // Set M2
         wait(300);
@@ -336,6 +372,8 @@ double readFoodLevels(void) {
      * @details uC2 (this uC) will read the first bowl. uC1 reads the second
      * bowl and sends high level commands to toggle the motor on/off when at
      * right threshold
+     * 
+     * @return level of the food bowl
      * 
      */
 
@@ -364,12 +402,14 @@ double readFoodLevels(void) {
 
 double readServingSize(void) {
     /**
-     * @brief Read serving size from binary input from uC1 and return
+     * @brief Read serving size from naive binary input from uC1 and return
      * respective serving size
+     * 
+     * @return serving size
      * 
      */
     
-    char uc1_input = (PORTB & 0b00011100) >> 2;
+    char uc1_input = (PINB & 0b00011100) >> 2;
 
     if (uc1_input == 0) {
         return 0.25;
@@ -394,6 +434,8 @@ double readServingSize(void) {
 void wait(volatile int msec) {
     /**
      * @brief wait for a number of milliseconds, assuming a 1MHz clock-cycle
+     * 
+     * @param msec [ms] number of milliseconds
      * 
      */
 
@@ -426,6 +468,7 @@ void rotate(int deg, char dir, float stride, float rot_t) {
      * @param dir [-] direction. 1 (CCW), 0 (CW)
      * @param stride [deg] motor stride, in same units as deg
      * @param rot_t [ms] time to complete rotation in
+     * 
      */
     
     int total_steps = deg/stride; // Undershoot if not perfect
@@ -451,37 +494,33 @@ void step_ccw(void) {
     /**
      * @brief Step the motor phase counter-clockwise 1 step
      * 
-     * @details Phases: (1a = D7) (1b = D6) (2a = D5) (2b = D4)  
      * @details Phases: (1a = C5) (1b = C4) (2a = C3) (2b = C2)        
-     *  1,3,4,2
+     * 
      */
+
     switch (phase_step) {
         case 1:
         // step to 2
         PORTC &= 0b1000011;
         PORTC |= 0b0000100;
-        // PORTD = 0b00010000;
         phase_step = 2;
         break;
         case 2:
         // step to 3
         PORTC &= 0b1000011;
         PORTC |= 0b0010000;
-        // PORTD = 0b01000000;
         phase_step = 3;
         break;
         case 3:
         // step to 4
         PORTC &= 0b1000011;
         PORTC |= 0b0001000;
-        // PORTD = 0b00100000;
         phase_step = 4;
         break;
         case 4:
         // step to 1
         PORTC &= 0b1000011;
         PORTC |= 0b0100000;
-        // PORTD = 0b10000000;
         phase_step = 1;
         break;
     }
@@ -491,43 +530,48 @@ void step_cw(void) {
     /**
      * @brief Step the motor phase counter-clockwise 1 step
      * 
-     * @details Phases: (1a = D7) (1b = D6) (2a = D5) (2b = D4)
      * @details Phases: (1a = C5) (1b = C4) (2a = C3) (2b = C2)        
      * 
      */
+
     switch (phase_step) {
         case 1:
         // step to 4
         PORTC &= 0b1000011;
         PORTC |= 0b0001000;
-        // PORTD = 0b00100000;
         phase_step = 4;
         break;
         case 2:
         // step to 1
         PORTC &= 0b1000011;
         PORTC |= 0b0100000;
-        // PORTD = 0b10000000;
         phase_step = 1;
         break;
         case 3:
         // step to 2
         PORTC &= 0b1000011;
         PORTC |= 0b0000100;
-        // PORTD = 0b00010000;
         phase_step = 2;
         break;
         case 4:
         // step to 3
         PORTC &= 0b1000011;
         PORTC |= 0b0010000;
-        // PORTD = 0b01000000;
         phase_step = 3;
         break;
     }
 }
 
 void LED_TOGGLE(char led, char port, char on) {
+    /**
+     * @brief Basic LED toggle function for given led, port, and state
+     * 
+     * @param led - LED to toggle
+     * @param port - PORT to set, in literal substitution
+     * @param on - LED state to toggle to
+     * 
+     */
+
     if (on) {
         switch (port) {
             case 'B':
