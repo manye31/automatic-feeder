@@ -2,7 +2,7 @@
 
 *Liam Melegari, Micah Nye, Sean Young*
 
-<img src="docs\animal_feeder.jpg" alt="Animal Feeder" width="400"/>
+<img src="docs\animal_feeder.gif" alt="Animal Feeder" width="400"/>
 
 This is an automatic animal feeder for a mechatronics project built off ATMega328P microcontrollers. The prototype feeder can feed user-specified increments of food to a given frequency per day, such as every 6 hours, for example.
 
@@ -27,3 +27,5 @@ A [stepper motor](https://www.digikey.com/en/products/detail/sparkfun-electronic
 
 ## Load Cell
 The [4541 load cell](https://www.adafruit.com/product/4541) is used in combination with the [HX711 Amplifiers](https://www.sparkfun.com/products/13879) to measure the load from which the microcontroller can use.
+
+<img src="docs\animal_feeder.jpg" alt="Animal Feeder" width="400"/>
